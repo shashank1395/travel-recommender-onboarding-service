@@ -5,6 +5,7 @@ import random
 import smtplib
 import time
 from configparser import ConfigParser
+from flask_jwt_extended import (create_access_token, create_refresh_token, jwt_required, jwt_refresh_token_required, get_jwt_identity, get_raw_jwt)
 
 from bson.json_util import dumps
 from flask import jsonify
@@ -24,6 +25,7 @@ app_config = ConfigParser()
 app_config.read(config_file_path)
 
 def register_user(registration_request):
+    print(registration_request)
     user = User()
     user = user_repository.check_if_user_exists(registration_request.email, registration_request.name)
     if user != None :
@@ -39,7 +41,7 @@ def register_user(registration_request):
     user_data.set_name(registration_request.get_name())
     user_data.set_email(registration_request.get_email())
     #user_data.user_id = sha256.hash(registration_request.password)
-    user_data.set_status(UserAccountStatus.ACTIVE.value)
+    user_data.set_status(UserAccountStatus.INACTIVE.value)
     if not registration_request.get_password():
        user_data.set_password_exists(False)
     user_data.set_created_at(current_time)
@@ -77,16 +79,40 @@ def __send_mail_for_otp__(receipient_mail, name, one_time_password):
     header = 'To:' + receipient_mail + '\n' + 'From: ' + app_config.get(
         'smtp_configuration', 'sender_id') + '\n' + 'Subject:' + app_config.get('smtp_configuration', 'subject') + str(one_time_password) + ' \n'
     message = header + '\n' + app_config.get('smtp_configuration', 'body_prefix').replace('[name]', name).replace('[otp]', str(one_time_password)) + '\n'
-
     server = smtplib.SMTP(app_config.get('smtp_configuration', 'host'), int(
         app_config.get('smtp_configuration', 'port')))
-
     server.ehlo()
     server.starttls()
     server.ehlo()
-
     server.login(app_config.get('smtp_configuration', 'username'),
                  app_config.get('smtp_configuration', 'password'))
     server.sendmail(app_config.get('smtp_configuration', 'sender_id'), receipient_mail.split(', '), message)
-
     server.close()
+
+def validate_otp(validate_otp_request):
+    user_data = user_repository.find_by_user_id(validate_otp_request.get_user_id())
+    if user_data == None:
+        raise travel_base_exception.TravelBaseExcpetion(str(ResponseCode.USER_NOT_EXISTS.name), 400, ResponseCode.USER_NOT_EXISTS.value)
+    if user_data['status'] == UserAccountStatus.DELETED.value:
+        raise travel_base_exception.TravelBaseExcpetion(str(ResponseCode.USER_DELETED.name), 400, ResponseCode.USER_DELETED.value)
+    current_time = int(time.time() * 1000)
+    otp_details = OTPDetails()
+    otp_details = otp_details_repository.check_if_otp_details_exists(validate_otp_request.get_user_id(), validate_otp_request.get_otp_reference_id())
+    if otp_details == None:
+        raise travel_base_exception.TravelBaseExcpetion(str(ResponseCode.OTP_RECORDS_NOT_FOUND.name), 400, ResponseCode.OTP_RECORDS_NOT_FOUND.value)
+    elif otp_details['number_of_validation_attempts'] >= 2:
+        raise travel_base_exception.TravelBaseExcpetion(str(ResponseCode.OTP_VALIDATION_ATTEMPT_REACHED.name), 400, ResponseCode.OTP_VALIDATION_ATTEMPT_REACHED.value)
+    elif current_time > otp_details['expires_at']:
+        raise travel_base_exception.TravelBaseExcpetion(str(ResponseCode.OTP_EXPIRED.name), 400, ResponseCode.OTP_EXPIRED.value)
+    elif validate_otp_request.get_otp() != otp_details['otp']:
+        raise travel_base_exception.TravelBaseExcpetion(str(ResponseCode.OTP_VALIDATION_FAILED.name), 400, ResponseCode.OTP_VALIDATION_FAILED.value)
+    otp_details_repository.update_otp_details(validate_otp_request.get_user_id(), validate_otp_request.get_otp_reference_id(), validate_otp_request.get_otp(), current_time, otp_details['number_of_validation_attempts'])
+    user_repository.update_user_status(validate_otp_request.get_user_id(), UserAccountStatus.ACTIVE.value, current_time)
+    message = {
+        'status': 1000,
+        'message': 'User Registered Successfully',
+        'acessToken' : create_access_token(identity = validate_otp_request.get_user_id()),
+        'refreshToken' : create_refresh_token(identity = validate_otp_request.get_user_id())
+    }
+    resp = jsonify(message)
+    return resp
